@@ -1,17 +1,17 @@
 # llm-batcher
 
-An **OpenAI-compatible proxy** in front of the **Anthropic Messages API** — the
+An **OpenAI-compatible proxy** in front of the **Anthropic Messages API**: the
 first primitive an inference-serving team ships. Point any OpenAI client at it,
 get Claude back, with a clean path to add adaptive batching, routing, and a
 cost/latency observatory.
 
-> **Status:** Day 1 — working pass-through proxy + request/response translation,
+> **Status:** Day 1. Working pass-through proxy + request/response translation,
 > fully unit-tested. Batching lands on Day 2.
 
 ## Why this exists
 
 I'm a Senior SRE repositioning toward AI inference systems. This repo applies the
-exact skills I already have — distributed systems, proxies, observability — to LLM
+exact skills I already have (distributed systems, proxies, observability) to LLM
 serving instead of databases. The roadmap turns it into a realistic miniature of
 what an inference proxy fleet does in production.
 
@@ -35,7 +35,7 @@ OpenAI client ──▶  POST /v1/chat/completions  ──▶  Anthropic Message
 
 | Day | Adds |
 |-----|------|
-| 1 ✅ | Pass-through proxy + OpenAI⇄Anthropic translation + tests |
+| 1 ✅ | Pass-through proxy + OpenAI/Anthropic translation + tests |
 | 2 | Request batching: accumulate concurrent requests into one upstream call window |
 | 3 | Cost & latency observatory: per-request metrics, p50/p95, $ estimate |
 | 4 | Backpressure + concurrency caps (the SRE part) |
