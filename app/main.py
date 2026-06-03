@@ -1,25 +1,30 @@
-"""llm-batcher — Day 1: OpenAI-compatible proxy in front of the Anthropic Messages API.
+"""llm-batcher: OpenAI-compatible proxy in front of the Anthropic Messages API.
 
-This is the skeleton. It accepts an OpenAI-style POST /v1/chat/completions
-request, translates it to the Anthropic Messages API, calls Anthropic, then
-translates the response back into the OpenAI chat-completion shape.
+It accepts an OpenAI-style POST /v1/chat/completions request, translates it to
+the Anthropic Messages API, calls Anthropic, then translates the response back
+into the OpenAI chat-completion shape.
 
-No batching yet — that lands on Day 2. The point of Day 1 is a clean,
-tested round-trip and a repo a hiring manager can read.
+An optional microbatching mode (BATCH_ENABLED=1) groups concurrent requests
+into a short admission window and fans them out as concurrency-limited realtime
+upstream calls. It is off by default, so the direct realtime path is unchanged
+unless you opt in.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
+from app.batcher import MicroBatcher
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -29,10 +34,72 @@ DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", "claude-3-5-haiku-latest")
 DEFAULT_MAX_TOKENS = int(os.environ.get("DEFAULT_MAX_TOKENS", "1024"))
 REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "60"))
 
+# --- Optional microbatching configuration (opt-in, default off). ---
+BATCH_ENABLED = os.environ.get("BATCH_ENABLED", "0").lower() in ("1", "true", "yes")
+BATCH_MAX_SIZE = int(os.environ.get("BATCH_MAX_SIZE", "16"))
+BATCH_MAX_WAIT_MS = int(os.environ.get("BATCH_MAX_WAIT_MS", "20"))
+BATCH_MAX_CONCURRENCY = int(os.environ.get("BATCH_MAX_CONCURRENCY", "8"))
+BATCH_TIMEOUT_S = float(os.environ.get("BATCH_TIMEOUT_S", str(REQUEST_TIMEOUT_S)))
+
+_shared_client: Optional[httpx.AsyncClient] = None
+_batcher: Optional[MicroBatcher] = None
+
+
+async def _anthropic_dispatch_one(payload: dict[str, Any]) -> dict[str, Any]:
+    """Perform one realtime Anthropic Messages call on the shared client."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set.")
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    }
+    try:
+        resp = await _shared_client.post(  # type: ignore[union-attr]
+            ANTHROPIC_API_URL, json=payload, headers=headers
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Upstream request failed: {exc}"
+        ) from exc
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=resp.status_code,
+            detail=f"Anthropic API error: {resp.text}",
+        )
+    return resp.json()
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(_app: "FastAPI"):
+    global _shared_client, _batcher
+    if BATCH_ENABLED:
+        _shared_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
+        _batcher = MicroBatcher(
+            _anthropic_dispatch_one,
+            max_batch_size=BATCH_MAX_SIZE,
+            max_wait_ms=BATCH_MAX_WAIT_MS,
+            max_concurrency=BATCH_MAX_CONCURRENCY,
+            batch_timeout_s=BATCH_TIMEOUT_S,
+        )
+    try:
+        yield
+    finally:
+        if _batcher is not None:
+            await _batcher.aclose()
+            _batcher = None
+        if _shared_client is not None:
+            with contextlib.suppress(Exception):
+                await _shared_client.aclose()
+            _shared_client = None
+
+
 app = FastAPI(
     title="llm-batcher",
     version="0.1.0",
     description="OpenAI-compatible proxy in front of the Anthropic Messages API.",
+    lifespan=_lifespan,
 )
 
 
@@ -126,13 +193,19 @@ async def health() -> dict[str, str]:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
+    if req.stream:
+        raise HTTPException(status_code=400, detail="Streaming is not supported yet.")
+
+    payload = _to_anthropic_payload(req)
+
+    if BATCH_ENABLED and _batcher is not None:
+        anthropic_json = await _batcher.submit(payload)
+        return _to_openai_response(anthropic_json, payload["model"])
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set.")
-    if req.stream:
-        raise HTTPException(status_code=400, detail="Streaming is not supported yet (Day 1).")
 
-    payload = _to_anthropic_payload(req)
     headers = {
         "x-api-key": api_key,
         "anthropic-version": ANTHROPIC_VERSION,
