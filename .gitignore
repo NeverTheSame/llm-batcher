@@ -17,4 +17,3 @@ venv/
 
 # Internal-only docs and visualizations (not for publication)
 BATCHING.md
-batching.html
