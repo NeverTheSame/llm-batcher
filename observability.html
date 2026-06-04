@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Why a cost and latency observatory? : llm-batcher</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131822;
+    --panel-2: #1a2130;
+    --ink: #e6edf3;
+    --muted: #9aa7b8;
+    --line: #263041;
+    --accent: #ff8a4c;
+    --accent-2: #5ec8ff;
+    --good: #4cd884;
+    --bad: #ff5d6c;
+    --warn: #ffd166;
+    --radius: 14px;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: radial-gradient(1200px 800px at 80% -10%, #16202e 0%, var(--bg) 55%);
+    color: var(--ink); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 22px 96px; }
+
+  header.hero { text-align: center; padding: 28px 0 8px; }
+  .badge {
+    display: inline-block; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; margin-bottom: 18px;
+    background: var(--panel);
+  }
+  h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.1; margin: 6px 0 14px; }
+  h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { color: var(--muted); max-width: 720px; margin: 0 auto; font-size: 18px; }
+
+  section { margin-top: 56px; }
+  h2 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+
+  .grid { display: grid; gap: 18px; }
+  .cols-2 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px){ .cols-2 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow);
+  }
+  .card h3 { margin: 0 0 8px; font-size: 18px; }
+  .card.bad h3 { color: var(--bad); }
+  .card.good h3 { color: var(--good); }
+
+  button {
+    background: var(--accent); color: #1a1006; border: 0; border-radius: 10px; padding: 10px 16px; font-weight: 700;
+    cursor: pointer; font-size: 14px;
+  }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:active { transform: translateY(1px); }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+
+  /* Histogram */
+  .hist { position: relative; height: 240px; border-radius: 12px; overflow: hidden;
+    background: repeating-linear-gradient(90deg, #0e131c, #0e131c 1px, transparent 1px, transparent 56px), #0c1019;
+    border: 1px solid var(--line); display: flex; align-items: flex-end; gap: 2px; padding: 10px 12px 0; }
+  .bar { flex: 1; background: linear-gradient(180deg, var(--accent-2), #2c6f93); border-radius: 4px 4px 0 0; min-height: 2px; transition: height .25s ease; }
+  .marker { position: absolute; top: 0; bottom: 26px; width: 2px; }
+  .marker .lbl { position: absolute; top: 4px; left: 6px; font-size: 11px; font-weight: 700; white-space: nowrap;
+    padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.45); }
+  .axis { position: absolute; left: 0; right: 0; bottom: 6px; display: flex; justify-content: space-between;
+    padding: 0 12px; font-size: 11px; color: var(--muted); }
+
+  .stat { display: flex; gap: 22px; flex-wrap: wrap; margin-top: 16px; }
+  .stat .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+  .stat .v { font-size: 22px; font-weight: 800; }
+  .v.good { color: var(--good); } .v.bad { color: var(--bad); } .v.warn { color: var(--warn); } .v.blue { color: var(--accent-2); }
+
+  ul.clean { list-style: none; padding: 0; margin: 0; }
+  ul.clean li { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  ul.clean li:last-child { border-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code { background: #0c1118; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  pre { background: #0c1118; border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow:auto; font-size: 13px; }
+
+  .concepts a.chip {
+    display: inline-flex; align-items: center; gap: 6px; margin: 6px 8px 0 0; padding: 8px 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-size: 13px;
+  }
+  .concepts a.chip:hover { border-color: var(--accent-2); text-decoration: none; }
+  .concepts a.chip span.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); }
+
+  .kicker { color: var(--accent); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
+  footer { margin-top: 70px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="badge">llm-batcher / inference proxy</div>
+    <h1>Why I added a <span class="grad">cost and latency observatory</span></h1>
+    <p class="lede">A proxy that translates and batches requests is still a black box until it can answer two
+    questions about itself: how fast is it, and what is it costing me? Here is why the average latency lies,
+    why percentiles do not, and how the dollar estimate refuses to fool you.</p>
+  </header>
+
+  <!-- ============ LIVE DEMO ============ -->
+  <section>
+    <span class="kicker">See it</span>
+    <h2>The average hides the pain</h2>
+    <p class="sub">A realistic latency distribution has a long tail. Most requests are fast, a few are slow,
+    and the few are what your users feel. Watch where the mean sits versus p95 and p99.</p>
+
+    <div class="card">
+      <div class="hist" id="hist"></div>
+      <div class="stat">
+        <div><div class="k">Mean</div><div class="v warn" id="mean">0 ms</div></div>
+        <div><div class="k">p50 (median)</div><div class="v good" id="p50">0 ms</div></div>
+        <div><div class="k">p95</div><div class="v bad" id="p95">0 ms</div></div>
+        <div><div class="k">p99</div><div class="v bad" id="p99">0 ms</div></div>
+        <div><div class="k">Max</div><div class="v" id="max">0 ms</div></div>
+      </div>
+      <div class="controls">
+        <button id="run">Generate a burst</button>
+        <button class="ghost" id="tail">Add a slow tail</button>
+        <button class="ghost" id="reset">Reset</button>
+      </div>
+      <p class="sub" style="margin-top:14px">
+        Notice how the mean barely moves when you add a few very slow requests, while p95 and p99 jump.
+        Reporting only the average would hide a real regression that your slowest users absolutely notice.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ WHY NOT JUST AVERAGES ============ -->
+  <section>
+    <span class="kicker">The decision</span>
+    <h2>Percentiles over averages, a window over all time</h2>
+    <div class="grid cols-2">
+      <div class="card bad">
+        <h3>The naive surface</h3>
+        <ul class="clean">
+          <li>Report mean latency and a lifetime request count.</li>
+          <li>The mean is dominated by the bulk and blind to the tail.</li>
+          <li>All time stats drift: a slow startup poisons the number forever.</li>
+          <li>Cost reported as a single figure, silently zero for any model you forgot to price.</li>
+        </ul>
+      </div>
+      <div class="card good">
+        <h3>The observatory</h3>
+        <ul class="clean">
+          <li>p50, p95, p99, and max over a bounded recent window.</li>
+          <li>Counts split into total, success, and error (a small RED surface).</li>
+          <li>Cost is an explicit estimate from a static table.</li>
+          <li>Unknown models counted as unpriced, never as zero, with an <code>estimate_complete</code> flag.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SNAPSHOT SHAPE ============ -->
+  <section>
+    <span class="kicker">What you get</span>
+    <h2>One JSON snapshot at <code>/metrics</code></h2>
+    <p class="sub">Off by default. With <code>METRICS_ENABLED=1</code> the proxy records one sample per request
+    and serves this. While disabled the endpoint returns 404 and nothing is collected.</p>
+    <pre>{
+  "requests": { "total": 1287, "success": 1273, "error": 14 },
+  "latency":  { "sample_count": 1024, "window_size": 1024,
+                "p50_ms": 412.0, "p95_ms": 980.5, "p99_ms": 1644.2, "max_ms": 2210.7 },
+  "tokens":   { "input": 902145, "output": 318220, "total": 1220365 },
+  "cost": {
+    "estimated_cost_usd": 1.998,
+    "estimate_complete": false,
+    "pricing_basis": "static table, USD per million tokens",
+    "unpriced_request_count": 6,
+    "unpriced_models": { "some-preview-model": 6 }
+  },
+  "note": "in-process, single-worker, opt-in estimate"
+}</pre>
+  </section>
+
+  <!-- ============ HONEST CAVEATS ============ -->
+  <section>
+    <span class="kicker">Stated on purpose</span>
+    <h2>What it is, and what it is not</h2>
+    <table>
+      <tr><th>Choice</th><th>Why</th><th>The honest limit</th></tr>
+      <tr>
+        <td>Bounded ring buffer of raw samples</td>
+        <td>Exact percentiles for the recent window, no bucket guesswork.</td>
+        <td>Describes recent traffic, not all time history.</td>
+      </tr>
+      <tr>
+        <td>Nearest rank percentile method</td>
+        <td>No interpolation, clean edges: p100 is the max, one sample is itself.</td>
+        <td>One sort per snapshot call (cheap because the window is clamped).</td>
+      </tr>
+      <tr>
+        <td>Static pricing table</td>
+        <td>The upstream gives exact token counts, so the only error source is price.</td>
+        <td>Prices change; the table is updated by hand.</td>
+      </tr>
+      <tr>
+        <td>Unknown models tracked as unpriced</td>
+        <td>A wrong but confident dollar figure is worse than a right but incomplete one.</td>
+        <td><code>estimate_complete</code> goes false until you add the price.</td>
+      </tr>
+      <tr>
+        <td>In process, single worker</td>
+        <td>Simplest thing that produces the numbers the next steps need.</td>
+        <td>Multiple workers each keep their own counters.</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- ============ CONCEPTS ============ -->
+  <section>
+    <span class="kicker">Read more</span>
+    <h2>The ideas behind it</h2>
+    <p class="sub">Every chip links to a primary source for the concept.</p>
+    <div class="concepts">
+      <a class="chip" href="https://cacm.acm.org/research/the-tail-at-scale/" target="_blank" rel="noopener"><span class="dot"></span>The Tail at Scale</a>
+      <a class="chip" href="https://en.wikipedia.org/wiki/Percentile#The_nearest-rank_method" target="_blank" rel="noopener"><span class="dot"></span>Nearest-rank percentile</a>
+      <a class="chip" href="https://grafana.com/blog/2018/08/02/the-red-method-how-to-instrument-your-services/" target="_blank" rel="noopener"><span class="dot"></span>RED method</a>
+      <a class="chip" href="https://www.brendangregg.com/usemethod.html" target="_blank" rel="noopener"><span class="dot"></span>USE method</a>
+      <a class="chip" href="https://github.com/HdrHistogram/HdrHistogram" target="_blank" rel="noopener"><span class="dot"></span>HdrHistogram</a>
+      <a class="chip" href="https://github.com/tdunning/t-digest" target="_blank" rel="noopener"><span class="dot"></span>t-digest quantiles</a>
+      <a class="chip" href="https://prometheus.io/docs/practices/histograms/" target="_blank" rel="noopener"><span class="dot"></span>Prometheus histograms and summaries</a>
+      <a class="chip" href="https://docs.anthropic.com/en/docs/about-claude/pricing" target="_blank" rel="noopener"><span class="dot"></span>Anthropic pricing</a>
+      <a class="chip" href="https://www.finops.org/framework/principles/" target="_blank" rel="noopener"><span class="dot"></span>FinOps principles</a>
+    </div>
+  </section>
+
+  <footer>
+    Part of <strong>llm-batcher</strong>, a build in public inference proxy. Measure first, then tune.
+  </footer>
+</div>
+
+<script>
+  // A small latency distribution generator: a fast lognormal-ish bulk plus an
+  // optional heavy tail, binned into a histogram with percentile markers.
+  const BINS = 18;
+  const BIN_MS = 150; // each bin is 150 ms wide, so the axis runs 0..2700 ms
+  let samples = [];
+
+  function lognormalish() {
+    // Box-Muller for a normal, then exponentiate for a right-skewed value.
+    let u = 0, v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    return Math.exp(5.9 + 0.45 * z); // median ~365 ms, modest spread
+  }
+
+  function addBurst(n) {
+    for (let i = 0; i < n; i++) samples.push(lognormalish());
+    render();
+  }
+
+  function addTail(n) {
+    for (let i = 0; i < n; i++) samples.push(1500 + Math.random() * 1100);
+    render();
+  }
+
+  function percentile(sorted, p) {
+    const len = sorted.length;
+    if (len === 0) return 0;
+    if (len === 1) return sorted[0];
+    let rank = Math.round((p / 100) * (len - 1));
+    rank = Math.max(0, Math.min(len - 1, rank));
+    return sorted[rank];
+  }
+
+  function render() {
+    const hist = document.getElementById('hist');
+    hist.innerHTML = '';
+    const counts = new Array(BINS).fill(0);
+    for (const s of samples) {
+      const b = Math.min(BINS - 1, Math.floor(s / BIN_MS));
+      counts[b]++;
+    }
+    const peak = Math.max(1, ...counts);
+    for (let i = 0; i < BINS; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'bar';
+      bar.style.height = (counts[i] / peak * 100) + '%';
+      hist.appendChild(bar);
+    }
+
+    const sorted = [...samples].sort((a, b) => a - b);
+    const mean = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : 0;
+    const stats = {
+      mean: mean,
+      p50: percentile(sorted, 50),
+      p95: percentile(sorted, 95),
+      p99: percentile(sorted, 99),
+      max: sorted.length ? sorted[sorted.length - 1] : 0,
+    };
+    document.getElementById('mean').textContent = Math.round(stats.mean) + ' ms';
+    document.getElementById('p50').textContent = Math.round(stats.p50) + ' ms';
+    document.getElementById('p95').textContent = Math.round(stats.p95) + ' ms';
+    document.getElementById('p99').textContent = Math.round(stats.p99) + ' ms';
+    document.getElementById('max').textContent = Math.round(stats.max) + ' ms';
+
+    // Draw markers for mean, p95, p99.
+    const fullMs = BINS * BIN_MS;
+    placeMarker(hist, stats.mean / fullMs, 'mean', 'var(--warn)');
+    placeMarker(hist, stats.p95 / fullMs, 'p95', 'var(--bad)');
+    placeMarker(hist, stats.p99 / fullMs, 'p99', 'var(--accent)');
+
+    const axis = document.createElement('div');
+    axis.className = 'axis';
+    axis.innerHTML = '<span>0 ms</span><span>' + (fullMs / 2) + ' ms</span><span>' + fullMs + '+ ms</span>';
+    hist.appendChild(axis);
+  }
+
+  function placeMarker(hist, frac, label, color) {
+    if (!samples.length) return;
+    frac = Math.max(0, Math.min(1, frac));
+    const m = document.createElement('div');
+    m.className = 'marker';
+    m.style.left = (12 + frac * (hist.clientWidth - 24)) + 'px';
+    m.style.background = color;
+    const lbl = document.createElement('div');
+    lbl.className = 'lbl';
+    lbl.style.color = color;
+    lbl.textContent = label;
+    m.appendChild(lbl);
+    hist.appendChild(m);
+  }
+
+  document.getElementById('run').onclick = () => addBurst(220);
+  document.getElementById('tail').onclick = () => addTail(12);
+  document.getElementById('reset').onclick = () => { samples = []; render(); };
+
+  addBurst(220);
+</script>
+</body>
+</html>

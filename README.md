@@ -37,7 +37,7 @@ OpenAI client ──▶  POST /v1/chat/completions  ──▶  Anthropic Message
 |-----|------|
 | 1 ✅ | Pass-through proxy + OpenAI/Anthropic translation + tests |
 | 2 ✅ | Microbatching: group concurrent requests into a short admission window, fan out under a concurrency cap |
-| 3 | Cost & latency observatory: per-request metrics, p50/p95, $ estimate |
+| 3 ✅ | Cost & latency observatory: per-request metrics, p50/p95, $ estimate |
 | 4 | Backpressure + concurrency caps (the SRE part) |
 | 5 | Benchmark harness: throughput vs. latency vs. cost under load |
 
@@ -80,6 +80,37 @@ The default is off, so the plain realtime path is unchanged unless you opt in.
 > Note: batching is per process. Running multiple workers gives each its own
 > window, which is fine for protecting the upstream but is not a single global
 > queue.
+
+## Cost and latency observatory (opt-in)
+
+You cannot tune what you cannot see. With `METRICS_ENABLED=1` the proxy records
+one sample per request (end-to-end latency, the input/output token counts the
+upstream reports, and an estimated dollar cost) and serves a JSON snapshot at
+`GET /metrics`. While disabled, that endpoint returns 404 and nothing is
+collected, so the default path stays exactly as it was.
+
+```bash
+# .env
+METRICS_ENABLED=1
+METRICS_LATENCY_WINDOW=1024
+```
+
+```bash
+curl -s localhost:8000/metrics | python3 -m json.tool
+```
+
+The snapshot reports request counts (total, success, error), latency
+percentiles (p50/p95/p99 and max) over the recent window, cumulative tokens, and
+an estimated spend. A few honest caveats are built in:
+
+- Cost is an estimate from a static, hand-maintained pricing table. Requests
+  whose model is not in the table are counted as `unpriced` (never as zero
+  cost), and `estimate_complete` flips to false so the number is never silently
+  wrong.
+- Percentiles describe the recent bounded window (`METRICS_LATENCY_WINDOW`
+  samples), not all-time history.
+- State is in process. Behind multiple workers each process keeps its own
+  counters; aggregate externally if that ever matters.
 
 ## Quickstart
 

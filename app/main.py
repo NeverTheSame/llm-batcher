@@ -8,6 +8,10 @@ An optional microbatching mode (BATCH_ENABLED=1) groups concurrent requests
 into a short admission window and fans them out as concurrency-limited realtime
 upstream calls. It is off by default, so the direct realtime path is unchanged
 unless you opt in.
+
+An optional cost and latency observatory (METRICS_ENABLED=1) records one sample
+per request and exposes a JSON snapshot at GET /metrics. It is off by default
+and the endpoint returns 404 until enabled.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.batcher import MicroBatcher
+from app.metrics import Metrics
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -41,8 +46,13 @@ BATCH_MAX_WAIT_MS = int(os.environ.get("BATCH_MAX_WAIT_MS", "20"))
 BATCH_MAX_CONCURRENCY = int(os.environ.get("BATCH_MAX_CONCURRENCY", "8"))
 BATCH_TIMEOUT_S = float(os.environ.get("BATCH_TIMEOUT_S", str(REQUEST_TIMEOUT_S)))
 
+# --- Optional cost and latency observatory (opt-in, default off). ---
+METRICS_ENABLED = os.environ.get("METRICS_ENABLED", "0").lower() in ("1", "true", "yes")
+METRICS_LATENCY_WINDOW = int(os.environ.get("METRICS_LATENCY_WINDOW", "1024"))
+
 _shared_client: Optional[httpx.AsyncClient] = None
 _batcher: Optional[MicroBatcher] = None
+_metrics: Optional[Metrics] = None
 
 
 async def _anthropic_dispatch_one(payload: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +83,9 @@ async def _anthropic_dispatch_one(payload: dict[str, Any]) -> dict[str, Any]:
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: "FastAPI"):
-    global _shared_client, _batcher
+    global _shared_client, _batcher, _metrics
+    if METRICS_ENABLED:
+        _metrics = Metrics(latency_window=METRICS_LATENCY_WINDOW)
     if BATCH_ENABLED:
         _shared_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
         _batcher = MicroBatcher(
@@ -93,6 +105,7 @@ async def _lifespan(_app: "FastAPI"):
             with contextlib.suppress(Exception):
                 await _shared_client.aclose()
             _shared_client = None
+        _metrics = None
 
 
 app = FastAPI(
@@ -104,7 +117,7 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-compatible request schema (the subset we support on Day 1).
+# OpenAI-compatible request schema (the subset we support).
 # ---------------------------------------------------------------------------
 class ChatMessage(BaseModel):
     role: str
@@ -191,17 +204,15 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "llm-batcher", "version": "0.1.0"}
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
-    if req.stream:
-        raise HTTPException(status_code=400, detail="Streaming is not supported yet.")
+@app.get("/metrics")
+async def metrics() -> dict[str, Any]:
+    if not METRICS_ENABLED or _metrics is None:
+        raise HTTPException(status_code=404, detail="Metrics are not enabled.")
+    return _metrics.snapshot()
 
-    payload = _to_anthropic_payload(req)
 
-    if BATCH_ENABLED and _batcher is not None:
-        anthropic_json = await _batcher.submit(payload)
-        return _to_openai_response(anthropic_json, payload["model"])
-
+async def _direct_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
+    """Perform one realtime Anthropic call on a per-request client (batching off)."""
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY is not set.")
@@ -224,4 +235,36 @@ async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
             detail=f"Anthropic API error: {resp.text}",
         )
 
-    return _to_openai_response(resp.json(), payload["model"])
+    return resp.json()
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
+    if req.stream:
+        raise HTTPException(status_code=400, detail="Streaming is not supported yet.")
+
+    payload = _to_anthropic_payload(req)
+    model = payload["model"]
+
+    start = time.perf_counter()
+    try:
+        if BATCH_ENABLED and _batcher is not None:
+            anthropic_json = await _batcher.submit(payload)
+        else:
+            anthropic_json = await _direct_dispatch(payload)
+    except Exception:
+        if _metrics is not None:
+            _metrics.record_error((time.perf_counter() - start) * 1000.0)
+        raise
+
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    if _metrics is not None:
+        usage = anthropic_json.get("usage", {})
+        _metrics.record_success(
+            model,
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            latency_ms,
+        )
+
+    return _to_openai_response(anthropic_json, model)
