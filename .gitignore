@@ -14,3 +14,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Internal-only docs and visualizations (not for publication)
+BATCHING.md
+batching.html
