@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Why backpressure and load shedding? : llm-batcher</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131822;
+    --panel-2: #1a2130;
+    --ink: #e6edf3;
+    --muted: #9aa7b8;
+    --line: #263041;
+    --accent: #ff8a4c;
+    --accent-2: #5ec8ff;
+    --good: #4cd884;
+    --bad: #ff5d6c;
+    --warn: #ffd166;
+    --radius: 14px;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: radial-gradient(1200px 800px at 80% -10%, #16202e 0%, var(--bg) 55%);
+    color: var(--ink); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 22px 96px; }
+
+  header.hero { text-align: center; padding: 28px 0 8px; }
+  .badge {
+    display: inline-block; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; margin-bottom: 18px;
+    background: var(--panel);
+  }
+  h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.1; margin: 6px 0 14px; }
+  h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { color: var(--muted); max-width: 720px; margin: 0 auto; font-size: 18px; }
+
+  section { margin-top: 56px; }
+  h2 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+
+  .grid { display: grid; gap: 18px; }
+  .cols-2 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px){ .cols-2 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow);
+  }
+  .card h3 { margin: 0 0 8px; font-size: 18px; }
+  .card.bad h3 { color: var(--bad); }
+  .card.good h3 { color: var(--good); }
+
+  button {
+    background: var(--accent); color: #1a1006; border: 0; border-radius: 10px; padding: 10px 16px; font-weight: 700;
+    cursor: pointer; font-size: 14px;
+  }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button:active { transform: translateY(1px); }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+
+  label.knob { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; }
+  input[type=range] { accent-color: var(--accent); }
+
+  /* Two-lane server visual */
+  .lanes { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px){ .lanes { grid-template-columns: 1fr; } }
+  .lane { background: #0c1019; border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  .lane h4 { margin: 0 0 10px; font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
+  .pill { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+  .pill.up { background: rgba(76,216,132,.15); color: var(--good); border: 1px solid rgba(76,216,132,.4); }
+  .pill.down { background: rgba(255,93,108,.15); color: var(--bad); border: 1px solid rgba(255,93,108,.4); }
+
+  .queue { height: 64px; border-radius: 8px; background: #0a0d14; border: 1px solid var(--line);
+    display: flex; align-items: flex-end; gap: 2px; padding: 6px; overflow: hidden; }
+  .dot2 { width: 7px; border-radius: 3px 3px 0 0; flex: none; }
+  .dot2.active { background: var(--accent-2); }
+  .dot2.wait { background: var(--warn); }
+  .dot2.shed { background: var(--bad); }
+
+  .meters { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 12px; }
+  .meter { background: #0a0d14; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .meter .k { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  .meter .v { font-size: 19px; font-weight: 800; }
+  .v.good { color: var(--good); } .v.bad { color: var(--bad); } .v.warn { color: var(--warn); } .v.blue { color: var(--accent-2); }
+
+  .bartrack { height: 10px; border-radius: 6px; background: #0a0d14; border: 1px solid var(--line); overflow: hidden; margin-top: 6px; }
+  .barfill { height: 100%; width: 0; transition: width .25s ease; }
+
+  ul.clean { list-style: none; padding: 0; margin: 0; }
+  ul.clean li { padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  ul.clean li:last-child { border-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  code { background: #0c1118; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  pre { background: #0c1118; border: 1px solid var(--line); border-radius: 12px; padding: 16px; overflow:auto; font-size: 13px; }
+
+  .concepts a.chip {
+    display: inline-flex; align-items: center; gap: 6px; margin: 6px 8px 0 0; padding: 8px 12px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 999px; color: var(--ink); font-size: 13px;
+  }
+  .concepts a.chip:hover { border-color: var(--accent-2); text-decoration: none; }
+  .concepts a.chip span.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-2); }
+
+  .kicker { color: var(--accent); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
+  footer { margin-top: 70px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="badge">llm-batcher / inference proxy</div>
+    <h1>Why I added <span class="grad">backpressure and load shedding</span></h1>
+    <p class="lede">A proxy that accepts every request during a spike does not stay up longer. It fails slower,
+    and for everyone at once. Here is why an unbounded queue is the real failure mode, and why a fast
+    <code>429</code> is a kindness.</p>
+  </header>
+
+  <!-- ============ LIVE DEMO ============ -->
+  <section>
+    <span class="kicker">See it</span>
+    <h2>Same overload, two policies</h2>
+    <p class="sub">Both servers complete the same number of requests per tick. Push arrivals past that and watch
+    what each does with the excess. Drag the load past capacity and let it run.</p>
+
+    <div class="card">
+      <div class="controls" style="margin-bottom:16px">
+        <button id="run">Start the spike</button>
+        <button class="ghost" id="reset">Reset</button>
+        <label class="knob">Arrivals / tick
+          <input type="range" id="load" min="1" max="40" value="26" />
+          <span id="loadVal" class="v blue" style="font-size:15px">26</span>
+        </label>
+        <label class="knob">Capacity (MAX_INFLIGHT)
+          <input type="range" id="cap" min="1" max="20" value="10" />
+          <span id="capVal" class="v good" style="font-size:15px">10</span>
+        </label>
+      </div>
+
+      <div class="lanes">
+        <div class="lane">
+          <h4>Accept everything (unbounded queue) <span class="pill down" id="badState">degrading</span></h4>
+          <div class="queue" id="badQ"></div>
+          <div class="meters">
+            <div class="meter"><div class="k">In system</div><div class="v bad" id="badInSys">0</div></div>
+            <div class="meter"><div class="k">Wait (latency)</div><div class="v bad" id="badWait">0 ms</div></div>
+            <div class="meter"><div class="k">Memory</div><div class="v bad" id="badMem">0 MB</div></div>
+          </div>
+        </div>
+
+        <div class="lane">
+          <h4>Admit and shed (this proxy) <span class="pill up" id="goodState">healthy</span></h4>
+          <div class="queue" id="goodQ"></div>
+          <div class="meters">
+            <div class="meter"><div class="k">In flight</div><div class="v good" id="goodInSys">0</div></div>
+            <div class="meter"><div class="k">Wait (latency)</div><div class="v good" id="goodWait">0 ms</div></div>
+            <div class="meter"><div class="k">Shed (429)</div><div class="v warn" id="goodShed">0</div></div>
+          </div>
+        </div>
+      </div>
+
+      <p class="sub" style="margin-top:16px">
+        On the left the backlog and latency climb without bound because nothing is ever turned away. On the
+        right the in flight count holds flat at capacity, latency stays steady, and the excess is rejected
+        immediately so callers can back off. Same hardware, opposite behavior at the edge.
+      </p>
+    </div>
+  </section>
+
+  <!-- ============ THE DECISION ============ -->
+  <section>
+    <span class="kicker">The decision</span>
+    <h2>Cap concurrency, queue a little, shed the rest</h2>
+    <div class="grid cols-2">
+      <div class="card bad">
+        <h3>The default that betrays you</h3>
+        <ul class="clean">
+          <li>Accept every connection; let an unbounded queue absorb overflow.</li>
+          <li>Backlog grows, so memory grows with it.</li>
+          <li>Every caller's latency rises together, even cheap requests.</li>
+          <li>Timeouts fire, clients retry, retries add load: the retry storm.</li>
+          <li>It looks like resilience and is the opposite.</li>
+        </ul>
+      </div>
+      <div class="card good">
+        <h3>The admission gate</h3>
+        <ul class="clean">
+          <li>Process at most <code>MAX_INFLIGHT</code> requests at once.</li>
+          <li>Let a small bounded number wait briefly for a slot (<code>MAX_QUEUE</code>).</li>
+          <li>Shed the rest now with <code>429</code> and a <code>Retry-After</code> header.</li>
+          <li>Admitted requests run at full speed; the tail stays bounded.</li>
+          <li>A fast rejection returns control to the client while it still has options.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ WHY CONCURRENCY NOT RATE ============ -->
+  <section>
+    <span class="kicker">The subtlety</span>
+    <h2>Why limit concurrency, not a requests-per-second rate</h2>
+    <div class="card">
+      <p style="margin-top:0">A fixed requests-per-second cap is brittle, because the cost of a request varies.
+      Limiting concurrent in flight work adapts on its own: when the upstream slows down, in flight requests
+      linger, fewer slots free up, and the gate starts shedding sooner without anyone re-tuning a number.
+      Concurrency is the control variable that maps to real resource pressure.</p>
+      <p style="margin-bottom:0">This is also why the admission wait is counted inside an admitted request's
+      latency. The time a request spends queued is latency the client really felt, so the observatory's
+      end-to-end numbers stay honest. A shed request, by contrast, is not a served request, so it is kept out
+      of the success and latency stats and counted in its own <code>rejected</code> bucket.</p>
+    </div>
+  </section>
+
+  <!-- ============ THE STATE MACHINE ============ -->
+  <section>
+    <span class="kicker">Under the hood</span>
+    <h2>One lock, no leaked slots</h2>
+    <p class="sub">The tempting implementation, a semaphore plus a side counter, has a cancellation race: a
+    timeout can fire just after the permit is handed out, leaking a slot forever. So the limiter keeps all of
+    its state behind a single <code>asyncio.Condition</code>; every transition is one atomic step.</p>
+    <pre><code>acquire():
+  under the condition lock:
+    if closed:                       -&gt; Rejected("shutdown")
+    if a slot is free AND nobody waits ahead:
+        active += 1; return          # fast path
+    if waiting &gt;= max_queue:          -&gt; Rejected("queue_full")
+    waiting += 1
+    loop until the deadline:
+        if closed:                   -&gt; Rejected("shutdown")
+        if a slot is free:           active += 1; return
+        wait on the condition for the remaining budget
+        if the budget is gone:       -&gt; Rejected("queue_timeout")
+    finally: waiting -= 1, and re-notify the next waiter if we
+             were woken but did not take the slot</code></pre>
+    <p class="sub" style="margin-top:14px">The fairness gate (<code>nobody waits ahead</code>) stops a steady
+    arrival stream from starving a parked waiter. The <code>finally</code> re-notify makes sure a wake-up is
+    never swallowed, so a free slot is never stranded.</p>
+  </section>
+
+  <!-- ============ CONFIG ============ -->
+  <section>
+    <span class="kicker">The knobs</span>
+    <h2>Opt-in, off by default</h2>
+    <table>
+      <tr><th>Env</th><th>Default</th><th>Meaning</th></tr>
+      <tr><td><code>MAX_INFLIGHT</code></td><td><code>0</code></td><td>Max requests processed at once. <code>0</code> disables the gate and the request path is unchanged.</td></tr>
+      <tr><td><code>MAX_QUEUE</code></td><td><code>0</code></td><td>How many may wait for a slot. <code>0</code> is pure fail fast.</td></tr>
+      <tr><td><code>ACQUIRE_TIMEOUT_S</code></td><td><code>0.5</code></td><td>Longest a queued request waits before it is shed.</td></tr>
+      <tr><td><code>RETRY_AFTER_S</code></td><td><code>1</code></td><td>Value sent in the <code>Retry-After</code> header on a <code>429</code>.</td></tr>
+    </table>
+    <p class="sub" style="margin-top:14px">With <code>METRICS_ENABLED=1</code>, <code>GET /metrics</code>
+    grows a <code>rejected</code> block (total plus per-reason counts) and a live <code>concurrency</code>
+    gauge, so total inbound is <code>requests_total + rejected_total</code>.</p>
+  </section>
+
+  <!-- ============ CONCEPTS ============ -->
+  <section>
+    <span class="kicker">Go deeper</span>
+    <h2>The ideas this borrows from</h2>
+    <p class="sub">Every chip links to a primary source for the concept.</p>
+    <div class="concepts">
+      <a class="chip" href="https://sre.google/sre-book/handling-overload/" target="_blank" rel="noopener"><span class="dot"></span>Google SRE: Handling Overload</a>
+      <a class="chip" href="https://sre.google/sre-book/addressing-cascading-failures/" target="_blank" rel="noopener"><span class="dot"></span>Cascading failures and retry storms</a>
+      <a class="chip" href="https://en.wikipedia.org/wiki/Little%27s_law" target="_blank" rel="noopener"><span class="dot"></span>Little's Law</a>
+      <a class="chip" href="https://github.com/Netflix/concurrency-limits" target="_blank" rel="noopener"><span class="dot"></span>Netflix adaptive concurrency limits</a>
+      <a class="chip" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429" target="_blank" rel="noopener"><span class="dot"></span>HTTP 429 Too Many Requests</a>
+      <a class="chip" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Retry-After" target="_blank" rel="noopener"><span class="dot"></span>Retry-After header</a>
+      <a class="chip" href="https://www.reactive-streams.org/" target="_blank" rel="noopener"><span class="dot"></span>Reactive Streams backpressure</a>
+      <a class="chip" href="https://docs.python.org/3/library/asyncio-sync.html#asyncio.Condition" target="_blank" rel="noopener"><span class="dot"></span>asyncio.Condition</a>
+      <a class="chip" href="https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/" target="_blank" rel="noopener"><span class="dot"></span>Backoff with jitter</a>
+    </div>
+  </section>
+
+  <footer>
+    Part of <a href="https://github.com/NeverTheSame/llm-batcher" target="_blank" rel="noopener">llm-batcher</a>, an OpenAI-compatible Anthropic proxy built in public. Diagram is illustrative.
+  </footer>
+
+</div>
+
+<script>
+  const cols = 60; // dots per queue lane
+  let timer = null;
+  let load = 26, cap = 10, tovf = 0.5;
+
+  const state = {
+    bad: { inSys: 0 },
+    good: { inFlight: 0, waiting: 0, shed: 0 },
+  };
+
+  const $ = (id) => document.getElementById(id);
+
+  function reset() {
+    if (timer) { clearInterval(timer); timer = null; }
+    state.bad.inSys = 0;
+    state.good.inFlight = 0; state.good.waiting = 0; state.good.shed = 0;
+    render();
+  }
+
+  function tick() {
+    const arrivals = load;
+    const served = cap; // both lanes complete `cap` per tick
+
+    // Unbounded queue: accept all arrivals, drain `served`, backlog accumulates.
+    state.bad.inSys = Math.max(0, state.bad.inSys + arrivals - served);
+
+    // Admit and shed: hold at most `cap` in flight, a tiny queue, shed the rest.
+    const maxQueue = 4;
+    state.good.inFlight = Math.min(cap, arrivals + state.good.waiting);
+    let leftover = arrivals + state.good.waiting - state.good.inFlight;
+    state.good.waiting = Math.min(maxQueue, Math.max(0, leftover));
+    const shedNow = Math.max(0, leftover - state.good.waiting);
+    state.good.shed += shedNow;
+
+    render();
+  }
+
+  function fillLane(el, segments) {
+    el.innerHTML = '';
+    let drawn = 0;
+    for (const seg of segments) {
+      const n = Math.min(seg.count, cols - drawn);
+      for (let i = 0; i < n; i++) {
+        const d = document.createElement('div');
+        d.className = 'dot2 ' + seg.cls;
+        // height scales a little with backlog depth for a "piling up" feel
+        d.style.height = seg.cls === 'active' ? '60%' : (seg.cls === 'wait' ? '85%' : '100%');
+        el.appendChild(d);
+        drawn++;
+      }
+      if (drawn >= cols) break;
+    }
+  }
+
+  function render() {
+    $('loadVal').textContent = load;
+    $('capVal').textContent = cap;
+
+    // Left lane: render in-system as a growing column of active dots (clamped).
+    const badShown = Math.min(cols, Math.round(state.bad.inSys));
+    fillLane($('badQ'), [{ count: badShown, cls: 'active' }]);
+    $('badInSys').textContent = Math.round(state.bad.inSys);
+    // Latency ~ Little's Law: time in system grows with backlog at fixed service rate.
+    const badWait = Math.round((state.bad.inSys / Math.max(1, cap)) * 180);
+    $('badWait').textContent = badWait + ' ms';
+    $('badMem').textContent = (40 + state.bad.inSys * 1.6).toFixed(0) + ' MB';
+    const overloaded = state.bad.inSys > cap;
+    $('badState').textContent = state.bad.inSys > cols ? 'collapsing' : (overloaded ? 'degrading' : 'ok');
+    $('badState').className = 'pill ' + (overloaded ? 'down' : 'up');
+
+    // Right lane: active slots + a few waiters; shed flashes at the tail.
+    fillLane($('goodQ'), [
+      { count: state.good.inFlight, cls: 'active' },
+      { count: state.good.waiting, cls: 'wait' },
+    ]);
+    $('goodInSys').textContent = state.good.inFlight;
+    const goodWait = Math.round((state.good.waiting / Math.max(1, cap)) * 180);
+    $('goodWait').textContent = goodWait + ' ms';
+    $('goodShed').textContent = state.good.shed;
+    $('goodState').textContent = 'healthy';
+    $('goodState').className = 'pill up';
+  }
+
+  $('run').onclick = () => {
+    if (timer) return;
+    timer = setInterval(tick, 350);
+  };
+  $('reset').onclick = reset;
+  $('load').oninput = (e) => { load = +e.target.value; render(); };
+  $('cap').oninput = (e) => { cap = +e.target.value; render(); };
+
+  render();
+</script>
+</body>
+</html>

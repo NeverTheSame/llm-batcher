@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from app.batcher import MicroBatcher
+from app.limiter import InflightLimiter, Rejected
 from app.metrics import Metrics
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -50,9 +51,18 @@ BATCH_TIMEOUT_S = float(os.environ.get("BATCH_TIMEOUT_S", str(REQUEST_TIMEOUT_S)
 METRICS_ENABLED = os.environ.get("METRICS_ENABLED", "0").lower() in ("1", "true", "yes")
 METRICS_LATENCY_WINDOW = int(os.environ.get("METRICS_LATENCY_WINDOW", "1024"))
 
+# --- Optional in-flight admission control / backpressure (opt-in, default off). ---
+# MAX_INFLIGHT <= 0 disables the limiter, so the request path is unchanged.
+MAX_INFLIGHT = int(os.environ.get("MAX_INFLIGHT", "0"))
+LIMITER_ENABLED = MAX_INFLIGHT > 0
+MAX_QUEUE = max(0, int(os.environ.get("MAX_QUEUE", "0")))
+ACQUIRE_TIMEOUT_S = max(0.0, float(os.environ.get("ACQUIRE_TIMEOUT_S", "0.5")))
+RETRY_AFTER_S = max(0, int(os.environ.get("RETRY_AFTER_S", "1")))
+
 _shared_client: Optional[httpx.AsyncClient] = None
 _batcher: Optional[MicroBatcher] = None
 _metrics: Optional[Metrics] = None
+_limiter: Optional[InflightLimiter] = None
 
 
 async def _anthropic_dispatch_one(payload: dict[str, Any]) -> dict[str, Any]:
@@ -83,9 +93,15 @@ async def _anthropic_dispatch_one(payload: dict[str, Any]) -> dict[str, Any]:
 
 @contextlib.asynccontextmanager
 async def _lifespan(_app: "FastAPI"):
-    global _shared_client, _batcher, _metrics
+    global _shared_client, _batcher, _metrics, _limiter
     if METRICS_ENABLED:
         _metrics = Metrics(latency_window=METRICS_LATENCY_WINDOW)
+    if LIMITER_ENABLED:
+        _limiter = InflightLimiter(
+            max_inflight=MAX_INFLIGHT,
+            max_queue=MAX_QUEUE,
+            acquire_timeout_s=ACQUIRE_TIMEOUT_S,
+        )
     if BATCH_ENABLED:
         _shared_client = httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
         _batcher = MicroBatcher(
@@ -98,6 +114,9 @@ async def _lifespan(_app: "FastAPI"):
     try:
         yield
     finally:
+        if _limiter is not None:
+            await _limiter.aclose()
+            _limiter = None
         if _batcher is not None:
             await _batcher.aclose()
             _batcher = None
@@ -208,7 +227,10 @@ async def health() -> dict[str, str]:
 async def metrics() -> dict[str, Any]:
     if not METRICS_ENABLED or _metrics is None:
         raise HTTPException(status_code=404, detail="Metrics are not enabled.")
-    return _metrics.snapshot()
+    snap = _metrics.snapshot()
+    if _limiter is not None:
+        snap["concurrency"] = await _limiter.snapshot()
+    return snap
 
 
 async def _direct_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
@@ -238,15 +260,14 @@ async def _direct_dispatch(payload: dict[str, Any]) -> dict[str, Any]:
     return resp.json()
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
-    if req.stream:
-        raise HTTPException(status_code=400, detail="Streaming is not supported yet.")
+async def _dispatch_and_record(
+    payload: dict[str, Any], model: str, start: float
+) -> dict[str, Any]:
+    """Run the upstream dispatch (batched or direct) and record metrics.
 
-    payload = _to_anthropic_payload(req)
-    model = payload["model"]
-
-    start = time.perf_counter()
+    `start` is captured by the caller before any admission wait, so the recorded
+    latency is end-to-end for admitted requests, including time spent queued.
+    """
     try:
         if BATCH_ENABLED and _batcher is not None:
             anthropic_json = await _batcher.submit(payload)
@@ -266,5 +287,33 @@ async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
             usage.get("output_tokens", 0),
             latency_ms,
         )
-
     return _to_openai_response(anthropic_json, model)
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(req: ChatCompletionRequest) -> dict[str, Any]:
+    if req.stream:
+        raise HTTPException(status_code=400, detail="Streaming is not supported yet.")
+
+    payload = _to_anthropic_payload(req)
+    model = payload["model"]
+    start = time.perf_counter()
+
+    if _limiter is None:
+        return await _dispatch_and_record(payload, model, start)
+
+    try:
+        await _limiter.acquire()
+    except Rejected as exc:
+        if _metrics is not None:
+            _metrics.record_rejected(exc.reason)
+        raise HTTPException(
+            status_code=429,
+            detail=f"Request shed by admission control ({exc.reason}).",
+            headers={"Retry-After": str(RETRY_AFTER_S)},
+        ) from exc
+
+    try:
+        return await _dispatch_and_record(payload, model, start)
+    finally:
+        await _limiter.release()

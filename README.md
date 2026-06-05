@@ -38,7 +38,7 @@ OpenAI client ──▶  POST /v1/chat/completions  ──▶  Anthropic Message
 | 1 ✅ | Pass-through proxy + OpenAI/Anthropic translation + tests |
 | 2 ✅ | Microbatching: group concurrent requests into a short admission window, fan out under a concurrency cap |
 | 3 ✅ | Cost & latency observatory: per-request metrics, p50/p95, $ estimate |
-| 4 | Backpressure + concurrency caps (the SRE part) |
+| 4 ✅ | Backpressure + concurrency caps (the SRE part) |
 | 5 | Benchmark harness: throughput vs. latency vs. cost under load |
 
 ## Microbatching (opt-in)
@@ -111,6 +111,36 @@ an estimated spend. A few honest caveats are built in:
   samples), not all-time history.
 - State is in process. Behind multiple workers each process keeps its own
   counters; aggregate externally if that ever matters.
+
+## Backpressure and load shedding (opt-in)
+
+A proxy that accepts every request during a spike does not stay up longer, it
+fails slower and for everyone at once: the queue grows without bound, memory
+climbs, and every caller's latency rises together. Setting `MAX_INFLIGHT` to a
+positive number turns on an admission gate. The proxy processes at most that
+many requests at a time, lets a small, bounded number wait briefly for a free
+slot, and sheds the rest immediately with `429 Too Many Requests` and a
+`Retry-After` header so callers back off instead of piling on. With
+`MAX_INFLIGHT=0` (the default) the gate is absent and the request path is
+exactly as it was.
+
+```bash
+# .env
+MAX_INFLIGHT=8         # max requests processed at once (0 disables the gate)
+MAX_QUEUE=16           # how many may wait for a slot (0 = fail fast, no queue)
+ACQUIRE_TIMEOUT_S=0.5  # max time a queued request waits before it is shed
+RETRY_AFTER_S=1        # value sent in the Retry-After header on a 429
+```
+
+When `METRICS_ENABLED=1` as well, `GET /metrics` grows a `rejected` block
+(total plus a per-reason breakdown of `queue_full`, `queue_timeout`, and
+`shutdown`) and a `concurrency` block with the live `active`/`waiting` gauges.
+Shed requests are deliberately kept out of `requests_total` and the latency
+samples, so total inbound traffic is `requests_total + rejected_total`. The
+admission wait counts toward an admitted request's recorded latency, which keeps
+the observatory's end-to-end numbers honest. This cap is on requests entering
+the proxy and is separate from the microbatcher's cap on concurrent upstream
+calls; the two compose.
 
 ## Quickstart
 

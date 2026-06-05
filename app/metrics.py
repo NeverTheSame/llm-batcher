@@ -87,6 +87,9 @@ class Metrics:
         self.unpriced_output_tokens = 0
         self.unpriced_models: dict[str, int] = {}
 
+        self.rejected_total = 0
+        self.rejected_reasons: dict[str, int] = {}
+
     def record_success(
         self,
         model: str,
@@ -118,6 +121,13 @@ class Metrics:
             self.requests_total += 1
             self.requests_error += 1
             self._latencies_ms.append(float(latency_ms))
+
+    def record_rejected(self, reason: str) -> None:
+        """Count a request shed by admission control. Not a processed request,
+        so it stays out of requests_total and the latency samples."""
+        with self._lock:
+            self.rejected_total += 1
+            self.rejected_reasons[reason] = self.rejected_reasons.get(reason, 0) + 1
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -154,4 +164,8 @@ class Metrics:
                     "unpriced_models": dict(self.unpriced_models),
                 },
                 "note": "in-process, single-worker, opt-in estimate",
+                "rejected": {
+                    "total": self.rejected_total,
+                    "reasons": dict(self.rejected_reasons),
+                },
             }
