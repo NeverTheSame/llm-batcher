@@ -39,7 +39,7 @@ OpenAI client ──▶  POST /v1/chat/completions  ──▶  Anthropic Message
 | 2 ✅ | Microbatching: group concurrent requests into a short admission window, fan out under a concurrency cap |
 | 3 ✅ | Cost & latency observatory: per-request metrics, p50/p95, $ estimate |
 | 4 ✅ | Backpressure + concurrency caps (the SRE part) |
-| 5 | Benchmark harness: throughput vs. latency vs. cost under load |
+| 5 ✅ | Benchmark harness: throughput vs. latency vs. cost under load |
 
 ## Microbatching (opt-in)
 
@@ -142,6 +142,30 @@ the observatory's end-to-end numbers honest. This cap is on requests entering
 the proxy and is separate from the microbatcher's cap on concurrent upstream
 calls; the two compose.
 
+## Benchmark harness
+
+`bench/loadgen.py` is a repeatable load driver that proves the features above
+with numbers instead of claims. It runs the real app in process over httpx's
+ASGI transport, replaces the upstream call with a stub that sleeps a fixed
+service time, and drives synthetic concurrent load. There is no network, no API
+key, and no spend, so the same command produces a comparable result anywhere.
+
+```bash
+./venv/bin/python -m bench.loadgen          # run the sweep, write results.html
+./venv/bin/python -m bench.loadgen --json   # also print raw JSON
+```
+
+It reports goodput (successful responses per second) separately from offered
+load and from shed requests, and it reconciles its client-side counts against
+the proxy's own `/metrics` so the two views agree. Two load modes are included:
+a closed loop (a fixed pool of workers) for steady throughput, and an open loop
+(a fixed arrival rate) that keeps offering load even when the server is
+saturated, which is the honest way to show the limiter shedding excess traffic.
+The default sweep contrasts a no-features baseline, microbatching (which trades
+latency for a bounded upstream call rate), and an overloaded limiter (goodput
+plateaus near capacity while the surplus returns `429`). The run writes a
+self-contained `results.html` chart with the embedded measurements.
+
 ## Quickstart
 
 ```bash
@@ -185,6 +209,8 @@ llm-batcher/
 ├── app/
 │   ├── main.py        # the proxy (FastAPI)
 │   └── batcher.py     # opt-in microbatching accumulator
+├── bench/
+│   └── loadgen.py     # in-process load harness, writes results.html
 ├── tests/
 │   ├── test_translation.py   # unit tests, mocked upstream
 │   ├── test_batcher.py       # microbatching unit tests, no network

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Load benchmark results : llm-batcher</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131822; --panel-2: #1a2130; --ink: #e6edf3;
+    --muted: #9aa7b8; --line: #263041; --accent: #ff8a4c; --accent-2: #5ec8ff;
+    --good: #4cd884; --bad: #ff5d6c; --warn: #ffd166;
+    --radius: 14px; --shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: radial-gradient(1200px 800px at 80% -10%, #16202e 0%, var(--bg) 55%);
+    color: var(--ink); font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 48px 22px 96px; }
+  header.hero { text-align: center; padding: 28px 0 8px; }
+  .badge { display: inline-block; font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--line); border-radius: 999px; padding: 6px 14px; margin-bottom: 18px; background: var(--panel); }
+  h1 { font-size: clamp(28px, 5vw, 46px); line-height: 1.1; margin: 6px 0 14px; }
+  h1 .grad { background: linear-gradient(90deg, var(--accent), var(--accent-2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { color: var(--muted); max-width: 760px; margin: 0 auto; font-size: 18px; }
+  section { margin-top: 56px; }
+  h2 { font-size: 26px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 22px; }
+  .card { background: linear-gradient(180deg, var(--panel), var(--panel-2)); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); }
+  .kicker { color: var(--accent); font-weight: 700; letter-spacing: .04em; text-transform: uppercase; font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  code { background: #0c1118; border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; font-size: 13px; }
+  .pill { font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 999px; }
+  .pill.ok { background: rgba(76,216,132,.15); color: var(--good); border: 1px solid rgba(76,216,132,.4); }
+  .pill.bad { background: rgba(255,93,108,.15); color: var(--bad); border: 1px solid rgba(255,93,108,.4); }
+  .chart { display: grid; gap: 14px; }
+  .row { display: grid; grid-template-columns: 150px 1fr 90px; align-items: center; gap: 12px; }
+  .row .lbl { color: var(--muted); font-size: 13px; }
+  .track { height: 22px; background: #0a0d14; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; border-radius: 6px 0 0 6px; }
+  .fill.good { background: linear-gradient(90deg, var(--good), #2f9c63); }
+  .fill.blue { background: linear-gradient(90deg, var(--accent-2), #2c6f93); }
+  .fill.warn { background: linear-gradient(90deg, var(--warn), #b8941f); }
+  .fill.bad { background: linear-gradient(90deg, var(--bad), #a13b45); }
+  .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; font-size: 14px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  footer { margin-top: 70px; color: var(--muted); font-size: 13px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div class="badge">llm-batcher / inference proxy</div>
+    <h1>Load benchmark <span class="grad">results</span></h1>
+    <p class="lede">A repeatable in process load test against a stubbed upstream (no network, no spend).
+    Throughput is reported as goodput, the rate of successful responses, kept separate from offered load
+    and from shed requests. Client side numbers reconcile against the proxy's own metrics.</p>
+  </header>
+
+  <section>
+    <span class="kicker">At a glance</span>
+    <h2>Scenario summary</h2>
+    <p class="sub" id="meta"></p>
+    <div class="card" style="overflow-x:auto">
+      <table id="summary">
+        <thead><tr>
+          <th>Scenario</th><th>Mode</th><th class="num">Offered/s</th><th class="num">Goodput/s</th>
+          <th class="num">429/s</th><th class="num">429 %</th>
+          <th class="num">p50 ok</th><th class="num">p95 ok</th><th class="num">p99 ok</th><th>Reconciles</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <span class="kicker">Goodput vs offered</span>
+    <h2>Useful work, not raw acceptance</h2>
+    <p class="sub">Goodput is successful responses per second. Where it sits below offered load, the gap is
+    either shed (429) or queued. A healthy overloaded system holds goodput near capacity instead of letting
+    everything degrade.</p>
+    <div class="card chart" id="goodputChart"></div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--accent-2)"></span>Offered/s</span>
+      <span><span class="dot" style="background:var(--good)"></span>Goodput/s</span>
+      <span><span class="dot" style="background:var(--bad)"></span>Shed/s (429)</span>
+    </div>
+  </section>
+
+  <section>
+    <span class="kicker">Latency</span>
+    <h2>Tail latency of successful requests</h2>
+    <p class="sub">p50, p95, and p99 of the successful (200) responses, in milliseconds. Under the limiter,
+    admitted latency stays bounded because the excess is rejected rather than queued without limit.</p>
+    <div class="card chart" id="latencyChart"></div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--good)"></span>p50</span>
+      <span><span class="dot" style="background:var(--warn)"></span>p95</span>
+      <span><span class="dot" style="background:var(--bad)"></span>p99</span>
+    </div>
+  </section>
+
+  <footer>
+    Part of <a href="https://github.com/NeverTheSame/llm-batcher" target="_blank" rel="noopener">llm-batcher</a>,
+    an OpenAI-compatible Anthropic proxy built in public. Numbers are from a stubbed upstream sample run and are
+    relative, not absolute provider performance. Regenerate with <code>python -m bench.loadgen</code>.
+  </footer>
+</div>
+
+<script>
+const PAYLOAD = {
+  "generated_utc": "2026-06-08T23:27:46Z",
+  "results": [
+    {
+      "name": "baseline",
+      "note": "Direct path, no features. Reference throughput and latency.",
+      "config": {
+        "mode": "closed",
+        "concurrency": 32,
+        "offered_rps": 0.0,
+        "duration_s": 1.0,
+        "warmup_s": 0.3,
+        "service_time_ms": 8.0,
+        "input_tokens": 800,
+        "output_tokens": 200,
+        "batch_enabled": false,
+        "batch_max_size": 16,
+        "batch_max_concurrency": 8,
+        "max_inflight": 0,
+        "max_queue": 0,
+        "stub_mode": "function_stub"
+      },
+      "client": {
+        "attempted": 3297,
+        "ok_200": 3297,
+        "rejected_429": 0,
+        "other": 0,
+        "measure_s": 1.008,
+        "offered_rps": 3270.3,
+        "goodput_rps": 3270.3,
+        "reject_rps": 0.0,
+        "reject_pct": 0.0,
+        "open_started": null,
+        "open_dropped": null,
+        "latency_all_ms": {
+          "count": 3297,
+          "mean_ms": 9.718,
+          "p50_ms": 8.822,
+          "p95_ms": 10.32,
+          "p99_ms": 30.393,
+          "max_ms": 75.859
+        },
+        "latency_ok_ms": {
+          "count": 3297,
+          "mean_ms": 9.718,
+          "p50_ms": 8.822,
+          "p95_ms": 10.32,
+          "p99_ms": 30.393,
+          "max_ms": 75.859
+        }
+      },
+      "server": {
+        "requests": {
+          "total": 4265,
+          "success": 4265,
+          "error": 0
+        },
+        "rejected": {
+          "total": 0,
+          "reasons": {}
+        },
+        "success_in_window": 3297,
+        "rejected_in_window": 0,
+        "latency_ok_ms": {
+          "p50_ms": 8.997,
+          "p95_ms": 23.626,
+          "p99_ms": 74.964,
+          "max_ms": 75.669
+        },
+        "concurrency": null,
+        "tokens_total": 4265000,
+        "estimated_cost_usd": 6.1416
+      },
+      "reconciliation": {
+        "client_200_eq_server_success": true,
+        "client_429_eq_server_rejected": true
+      },
+      "leaked_tasks": 0
+    },
+    {
+      "name": "microbatch",
+      "note": "Groups arrivals and caps upstream concurrency to 8. Trades latency for a bounded, predictable upstream call rate.",
+      "config": {
+        "mode": "closed",
+        "concurrency": 32,
+        "offered_rps": 0.0,
+        "duration_s": 1.0,
+        "warmup_s": 0.3,
+        "service_time_ms": 8.0,
+        "input_tokens": 800,
+        "output_tokens": 200,
+        "batch_enabled": true,
+        "batch_max_size": 16,
+        "batch_max_concurrency": 8,
+        "max_inflight": 0,
+        "max_queue": 0,
+        "stub_mode": "function_stub"
+      },
+      "client": {
+        "attempted": 816,
+        "ok_200": 816,
+        "rejected_429": 0,
+        "other": 0,
+        "measure_s": 1.038,
+        "offered_rps": 785.8,
+        "goodput_rps": 785.8,
+        "reject_rps": 0.0,
+        "reject_pct": 0.0,
+        "open_started": null,
+        "open_dropped": null,
+        "latency_all_ms": {
+          "count": 816,
+          "mean_ms": 40.089,
+          "p50_ms": 37.546,
+          "p95_ms": 54.655,
+          "p99_ms": 58.664,
+          "max_ms": 59.071
+        },
+        "latency_ok_ms": {
+          "count": 816,
+          "mean_ms": 40.089,
+          "p50_ms": 37.546,
+          "p95_ms": 54.655,
+          "p99_ms": 58.664,
+          "max_ms": 59.071
+        }
+      },
+      "server": {
+        "requests": {
+          "total": 1072,
+          "success": 1072,
+          "error": 0
+        },
+        "rejected": {
+          "total": 0,
+          "reasons": {}
+        },
+        "success_in_window": 816,
+        "rejected_in_window": 0,
+        "latency_ok_ms": {
+          "p50_ms": 37.384,
+          "p95_ms": 51.73,
+          "p99_ms": 58.446,
+          "max_ms": 58.879
+        },
+        "concurrency": null,
+        "tokens_total": 1072000,
+        "estimated_cost_usd": 1.54368
+      },
+      "reconciliation": {
+        "client_200_eq_server_success": true,
+        "client_429_eq_server_rejected": true
+      },
+      "leaked_tasks": 0
+    },
+    {
+      "name": "limiter_overload",
+      "note": "Open loop at 800 rps against ~400 rps of capacity. Goodput should plateau near capacity while the excess is shed with 429.",
+      "config": {
+        "mode": "open",
+        "concurrency": 32,
+        "offered_rps": 800.0,
+        "duration_s": 1.5,
+        "warmup_s": 0.3,
+        "service_time_ms": 20.0,
+        "input_tokens": 800,
+        "output_tokens": 200,
+        "batch_enabled": false,
+        "batch_max_size": 16,
+        "batch_max_concurrency": 8,
+        "max_inflight": 8,
+        "max_queue": 8,
+        "stub_mode": "function_stub"
+      },
+      "client": {
+        "attempted": 1200,
+        "ok_200": 534,
+        "rejected_429": 666,
+        "other": 0,
+        "measure_s": 1.54,
+        "offered_rps": 779.3,
+        "goodput_rps": 346.8,
+        "reject_rps": 432.5,
+        "reject_pct": 55.5,
+        "open_started": 1200,
+        "open_dropped": 0,
+        "latency_all_ms": {
+          "count": 1200,
+          "mean_ms": 18.56,
+          "p50_ms": 0.799,
+          "p95_ms": 49.9,
+          "p99_ms": 77.884,
+          "max_ms": 93.936
+        },
+        "latency_ok_ms": {
+          "count": 534,
+          "mean_ms": 41.058,
+          "p50_ms": 39.526,
+          "p95_ms": 61.004,
+          "p99_ms": 89.826,
+          "max_ms": 93.936
+        }
+      },
+      "server": {
+        "requests": {
+          "total": 652,
+          "success": 652,
+          "error": 0
+        },
+        "rejected": {
+          "total": 788,
+          "reasons": {
+            "queue_full": 788
+          }
+        },
+        "success_in_window": 534,
+        "rejected_in_window": 666,
+        "latency_ok_ms": {
+          "p50_ms": 39.446,
+          "p95_ms": 55.459,
+          "p99_ms": 87.065,
+          "max_ms": 93.055
+        },
+        "concurrency": {
+          "active": 0,
+          "waiting": 0,
+          "max_inflight": 8,
+          "max_queue": 8
+        },
+        "tokens_total": 652000,
+        "estimated_cost_usd": 0.93888
+      },
+      "reconciliation": {
+        "client_200_eq_server_success": true,
+        "client_429_eq_server_rejected": true
+      },
+      "leaked_tasks": 0
+    }
+  ]
+};
+const results = PAYLOAD.results;
+
+document.getElementById('meta').textContent =
+  'Generated ' + PAYLOAD.generated_utc + ' . ' + results.length + ' scenarios, stubbed upstream, single process.';
+
+function cell(v, cls) {
+  const td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = (v === null || v === undefined) ? '-' : v;
+  return td;
+}
+
+const tbody = document.querySelector('#summary tbody');
+for (const r of results) {
+  const c = r.client, lok = c.latency_ok_ms;
+  const tr = document.createElement('tr');
+  tr.appendChild(cell(r.name));
+  tr.appendChild(cell(r.config.mode));
+  tr.appendChild(cell(c.offered_rps, 'num'));
+  tr.appendChild(cell(c.goodput_rps, 'num'));
+  tr.appendChild(cell(c.reject_rps, 'num'));
+  tr.appendChild(cell(c.reject_pct, 'num'));
+  tr.appendChild(cell(lok.p50_ms, 'num'));
+  tr.appendChild(cell(lok.p95_ms, 'num'));
+  tr.appendChild(cell(lok.p99_ms, 'num'));
+  const ok = r.reconciliation.client_200_eq_server_success && r.reconciliation.client_429_eq_server_rejected;
+  const td = document.createElement('td');
+  const pill = document.createElement('span');
+  pill.className = 'pill ' + (ok ? 'ok' : 'bad');
+  pill.textContent = ok ? 'yes' : 'no';
+  td.appendChild(pill);
+  tr.appendChild(td);
+  tbody.appendChild(tr);
+}
+
+function bar(container, label, value, max, cls) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const lbl = document.createElement('div');
+  lbl.className = 'lbl';
+  lbl.textContent = label;
+  const track = document.createElement('div');
+  track.className = 'track';
+  const fill = document.createElement('div');
+  fill.className = 'fill ' + cls;
+  fill.style.width = (max > 0 ? Math.max(2, (value / max) * 100) : 0) + '%';
+  track.appendChild(fill);
+  const val = document.createElement('div');
+  val.className = 'val';
+  val.textContent = (value === null ? '-' : value);
+  row.appendChild(lbl); row.appendChild(track); row.appendChild(val);
+  container.appendChild(row);
+}
+
+const gp = document.getElementById('goodputChart');
+const gpMax = Math.max(...results.map(r => r.client.offered_rps), 1);
+for (const r of results) {
+  const head = document.createElement('div');
+  head.className = 'lbl';
+  head.style.cssText = 'grid-column:1/-1;color:var(--ink);font-weight:700;margin-top:6px';
+  head.textContent = r.name;
+  gp.appendChild(head);
+  bar(gp, 'offered/s', r.client.offered_rps, gpMax, 'blue');
+  bar(gp, 'goodput/s', r.client.goodput_rps, gpMax, 'good');
+  bar(gp, 'shed/s', r.client.reject_rps, gpMax, 'bad');
+}
+
+const lc = document.getElementById('latencyChart');
+const latMax = Math.max(...results.map(r => r.client.latency_ok_ms.p99_ms || 0), 1);
+for (const r of results) {
+  const lok = r.client.latency_ok_ms;
+  const head = document.createElement('div');
+  head.className = 'lbl';
+  head.style.cssText = 'grid-column:1/-1;color:var(--ink);font-weight:700;margin-top:6px';
+  head.textContent = r.name;
+  lc.appendChild(head);
+  bar(lc, 'p50 ms', lok.p50_ms, latMax, 'good');
+  bar(lc, 'p95 ms', lok.p95_ms, latMax, 'warn');
+  bar(lc, 'p99 ms', lok.p99_ms, latMax, 'bad');
+}
+</script>
+</body>
+</html>
